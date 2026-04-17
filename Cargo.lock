@@ -22043,6 +22043,7 @@ dependencies = [
  "project",
  "proptest",
  "proptest-derive",
+ "release_channel",
  "remote",
  "schemars 1.0.4",
  "serde",
