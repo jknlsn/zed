@@ -8528,18 +8528,33 @@ fn open_items(
                     let workspace = workspace.clone();
                     cx.spawn(async move |cx| {
                         let file_project_path = project_path?;
-                        let abs_path_task = workspace.update(cx, |workspace, cx| {
-                            workspace.project().update(cx, |project, cx| {
-                                project.resolve_abs_path(abs_path.to_string_lossy().as_ref(), cx)
+                        let entry_is_file = workspace
+                            .read_with(cx, |workspace, cx| {
+                                workspace
+                                    .project()
+                                    .read(cx)
+                                    .entry_for_path(&file_project_path, cx)
+                                    .map(|entry| entry.is_file())
                             })
-                        });
+                            .log_err()?;
 
-                        // We only want to open file paths here. If one of the items
-                        // here is a directory, it was already opened further above
-                        // with a `find_or_create_worktree`.
-                        if let Ok(task) = abs_path_task
-                            && task.await.is_none_or(|p| p.is_file())
-                        {
+                        let should_open_file = match entry_is_file {
+                            Some(entry_is_file) => entry_is_file,
+                            None => {
+                                let abs_path_task = workspace.update(cx, |workspace, cx| {
+                                    workspace.project().update(cx, |project, cx| {
+                                        project.resolve_abs_path(
+                                            abs_path.to_string_lossy().as_ref(),
+                                            cx,
+                                        )
+                                    })
+                                });
+
+                                abs_path_task.ok()?.await.is_none_or(|path| path.is_file())
+                            }
+                        };
+
+                        if should_open_file {
                             return Some((
                                 ix,
                                 workspace
@@ -11343,6 +11358,48 @@ mod tests {
     use settings::SettingsStore;
     use util::path;
     use util::rel_path::rel_path;
+
+    #[gpui::test]
+    async fn test_open_items_skips_directory_project_paths(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/root"), json!({ "file.txt": "" }))
+            .await;
+
+        let project = Project::test(fs, [path!("/root").as_ref()], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let worktree_id = project.read_with(cx, |project, cx| {
+            project
+                .worktrees(cx)
+                .next()
+                .expect("test project should have a worktree")
+                .read(cx)
+                .id()
+        });
+
+        let opened_items = workspace
+            .update_in(cx, |_, window, cx| {
+                open_items(
+                    None,
+                    vec![(
+                        PathBuf::from(path!("/metadata-unavailable")),
+                        Some(ProjectPath {
+                            worktree_id,
+                            path: RelPath::empty().into(),
+                        }),
+                    )],
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("open_items should not fail");
+
+        assert_eq!(opened_items.len(), 1);
+        assert!(opened_items.first().is_some_and(Option::is_none));
+    }
 
     #[test]
     fn test_render_window_title_format_omits_empty_segments() {
