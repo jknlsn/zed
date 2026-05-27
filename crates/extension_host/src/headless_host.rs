@@ -66,6 +66,21 @@ impl HeadlessExtensionStore {
         extensions: Vec<ExtensionVersion>,
         cx: &Context<Self>,
     ) -> Task<Result<Vec<ExtensionVersion>>> {
+        let requested_extensions = extensions
+            .iter()
+            .map(|extension| {
+                format!(
+                    "{}@{}{}",
+                    extension.id,
+                    extension.version,
+                    if extension.dev { " (dev)" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>();
+        log::info!(
+            "Remote extension sync requested: {:?}",
+            requested_extensions
+        );
         let on_client = HashSet::from_iter(extensions.iter().map(|e| e.id.as_str()));
         let to_remove: Vec<Arc<str>> = self
             .loaded_extensions
@@ -84,6 +99,22 @@ impl HeadlessExtensionStore {
                     .is_none_or(|loaded| loaded.as_ref() != e.version.as_str())
             })
             .collect();
+        let to_load_ids = to_load
+            .iter()
+            .map(|extension| {
+                format!(
+                    "{}@{}{}",
+                    extension.id,
+                    extension.version,
+                    if extension.dev { " (dev)" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>();
+        log::info!(
+            "Remote extension sync plan: remove={:?}, load={:?}",
+            to_remove,
+            to_load_ids
+        );
 
         cx.spawn(async move |this, cx| {
             let mut missing = Vec::new();
@@ -125,6 +156,28 @@ impl HeadlessExtensionStore {
         })?;
 
         let manifest = Arc::new(ExtensionManifest::load(fs.clone(), &extension_dir).await?);
+        let language_server_ids = manifest
+            .language_servers
+            .keys()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>();
+        let debug_adapter_ids = manifest
+            .debug_adapters
+            .keys()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>();
+        log::info!(
+            "Loading remote extension {}@{} (requested {}@{}, dev: {}, allow_remote_load: {}, languages: {:?}, language_servers: {:?}, debug_adapters: {:?})",
+            manifest.id,
+            manifest.version,
+            extension.id,
+            extension.version,
+            extension.dev,
+            manifest.allow_remote_load(),
+            manifest.languages,
+            language_server_ids,
+            debug_adapter_ids
+        );
 
         debug_assert!(!manifest.languages.is_empty() || manifest.allow_remote_load());
 

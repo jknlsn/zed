@@ -1810,7 +1810,7 @@ impl ExtensionStore {
         client: WeakEntity<RemoteClient>,
         cx: &mut AsyncApp,
     ) -> Result<()> {
-        let extensions = this.update(cx, |this, _cx| {
+        let extensions: Vec<proto::Extension> = this.update(cx, |this, _cx| {
             this.extension_index
                 .extensions
                 .iter()
@@ -1826,6 +1826,21 @@ impl ExtensionStore {
                 })
                 .collect()
         })?;
+        let extension_ids = extensions
+            .iter()
+            .map(|extension: &proto::Extension| {
+                format!(
+                    "{}@{}{}",
+                    extension.id,
+                    extension.version,
+                    if extension.dev { " (dev)" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>();
+        log::info!(
+            "Syncing remote extensions to SSH server: {:?}",
+            extension_ids
+        );
 
         let response = client
             .update(cx, |client, _cx| {
@@ -1835,6 +1850,22 @@ impl ExtensionStore {
             })?
             .await?;
         let path_style = client.read_with(cx, |client, _| client.path_style())?;
+        let missing_extension_ids = response
+            .missing_extensions
+            .iter()
+            .map(|extension| {
+                format!(
+                    "{}@{}{}",
+                    extension.id,
+                    extension.version,
+                    if extension.dev { " (dev)" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>();
+        log::info!(
+            "Remote SSH server missing extensions: {:?}",
+            missing_extension_ids
+        );
 
         for missing_extension in response.missing_extensions.into_iter() {
             let tmp_dir = tempfile::tempdir()?;
@@ -1911,11 +1942,13 @@ impl ExtensionStore {
         anyhow::Ok(())
     }
 
-    pub fn register_remote_client(
-        &mut self,
-        client: Entity<RemoteClient>,
-        _cx: &mut Context<Self>,
-    ) {
+    pub fn register_remote_client(&mut self, client: Entity<RemoteClient>, cx: &mut Context<Self>) {
+        let remote_client = client.read(cx);
+        log::info!(
+            "Registering remote client for extension sync: {:?}, path style: {:?}",
+            remote_client.connection_options(),
+            remote_client.path_style()
+        );
         self.remote_clients.push(client.downgrade());
         self.ssh_registered_tx.unbounded_send(()).ok();
     }

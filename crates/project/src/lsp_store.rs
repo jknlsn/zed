@@ -470,6 +470,15 @@ impl LocalLspStore {
                     }
                 }
             });
+        let server_name: &str = adapter.name.0.as_ref();
+        if language_name == "Swift" || server_name == "sourcekit-lsp" {
+            log::info!(
+                "Language server start requested: name={}, language={}, worktree_id={worktree_id:?}, path={worktree_abs_path:?}, waiting_for_trust={}",
+                adapter.name,
+                language_name,
+                wait_until_worktree_trust.is_some()
+            );
+        }
         let update_binary_status = wait_until_worktree_trust.is_none();
 
         let binary = self.get_language_server_binary(
@@ -2839,6 +2848,10 @@ impl LocalLspStore {
         }
 
         let abs_path = file.abs_path(cx);
+        let is_swift_path = abs_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "swift" | "swiftinterface"));
         let Some(uri) = file_path_to_lsp_url(&abs_path).log_err() else {
             return;
         };
@@ -2846,8 +2859,15 @@ impl LocalLspStore {
         let worktree_id = file.worktree_id(cx);
 
         let Some(language) = buffer.language().cloned() else {
+            if is_swift_path {
+                log::info!(
+                    "Skipping LSP registration for Swift path {abs_path:?}: buffer has no language"
+                );
+            }
             return;
         };
+        let language_name = language.name();
+        let log_lsp_registration = is_swift_path || language_name == "Swift";
         let path: Arc<RelPath> = file
             .path()
             .parent()
@@ -2858,9 +2878,13 @@ impl LocalLspStore {
             .read(cx)
             .worktree_for_id(worktree_id, cx)
         else {
+            if log_lsp_registration {
+                log::info!(
+                    "Skipping LSP registration for {language_name} buffer {abs_path:?}: missing worktree {worktree_id:?}"
+                );
+            }
             return;
         };
-        let language_name = language.name();
         let (reused, delegate, servers) = self
             .reuse_existing_language_server(&self.lsp_tree, &worktree, &language_name, cx)
             .map(|(delegate, apply)| (true, delegate, apply(&mut self.lsp_tree)))
@@ -2881,6 +2905,15 @@ impl LocalLspStore {
                     .collect::<Vec<_>>();
                 (false, lsp_delegate, servers)
             });
+        if log_lsp_registration {
+            let server_names = servers
+                .iter()
+                .filter_map(|server| server.name())
+                .collect::<Vec<_>>();
+            log::info!(
+                "LSP registration candidates for buffer {abs_path:?}: language={language_name}, worktree_id={worktree_id:?}, reused={reused}, candidates={server_names:?}, only_register={only_register_servers:?}"
+            );
+        }
         let servers_and_adapters = servers
             .into_iter()
             .filter_map(|server_node| {
@@ -2905,6 +2938,13 @@ impl LocalLspStore {
 
                     {
                         let uri = Uri::from_file_path(worktree.read(cx).absolutize(&path.path));
+                        if log_lsp_registration {
+                            log::info!(
+                                "Initializing LSP candidate for buffer {abs_path:?}: server={}, root={:?}",
+                                disposition.server_name,
+                                disposition.path
+                            );
+                        }
 
                         let server_id = self.get_or_insert_language_server(
                             &worktree,
@@ -2929,6 +2969,11 @@ impl LocalLspStore {
                 {
                     Some((server.clone(), adapter.clone()))
                 } else {
+                    if log_lsp_registration {
+                        log::info!(
+                            "LSP candidate for buffer {abs_path:?} is not running yet: server_id={server_id:?}, state=starting"
+                        );
+                    }
                     None
                 }
             })
