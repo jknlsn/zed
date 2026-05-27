@@ -42,7 +42,7 @@ use language::{
 use node_runtime::NodeRuntime;
 use project::ContextProviderWithTasks;
 use release_channel::ReleaseChannel;
-use remote::RemoteClient;
+use remote::{ConnectionState, RemoteClient};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use settings::{SemanticTokenRules, Settings, SettingsStore};
@@ -236,7 +236,15 @@ pub fn init(
 
     cx.on_action(|_: &ReloadExtensions, cx| {
         let store = cx.global::<GlobalExtensionStore>().0.clone();
-        store.update(cx, |store, cx| drop(store.reload(None, cx)));
+        let reload = store.update(cx, |store, cx| store.reload(None, cx));
+        let store = store.downgrade();
+        cx.spawn(async move |cx| {
+            reload.await;
+            ExtensionStore::update_remote_clients(&store, cx)
+                .await
+                .log_err();
+        })
+        .detach();
     });
 
     cx.set_global(GlobalExtensionStore(store));
@@ -1934,22 +1942,71 @@ impl ExtensionStore {
         })?;
 
         for client in clients {
-            Self::sync_extensions_to_remotes(this, client, cx)
-                .await
+            let connection_state = client
+                .read_with(cx, |client, _| client.connection_state())
                 .log_err();
+            if connection_state != Some(ConnectionState::Connected) {
+                log::info!(
+                    "Skipping remote extension sync for client in state {:?}",
+                    connection_state
+                );
+                continue;
+            }
+            cx.spawn({
+                let this = this.clone();
+                async move |cx| {
+                    Self::sync_extensions_to_remotes(&this, client, cx)
+                        .await
+                        .log_err();
+                }
+            })
+            .detach();
         }
 
         anyhow::Ok(())
     }
 
     pub fn register_remote_client(&mut self, client: Entity<RemoteClient>, cx: &mut Context<Self>) {
-        let remote_client = client.read(cx);
+        let client_id = client.entity_id();
+        let (connection_options, path_style, mut last_connection_state) =
+            client.read_with(cx, |client, _| {
+                (
+                    client.connection_options(),
+                    client.path_style(),
+                    client.connection_state(),
+                )
+            });
         log::info!(
             "Registering remote client for extension sync: {:?}, path style: {:?}",
-            remote_client.connection_options(),
-            remote_client.path_style()
+            connection_options,
+            path_style
         );
-        self.remote_clients.push(client.downgrade());
+
+        self.remote_clients
+            .retain(|client| client.upgrade().is_some());
+        let already_registered = self.remote_clients.iter().any(|remote_client| {
+            remote_client
+                .upgrade()
+                .is_some_and(|remote_client| remote_client.entity_id() == client_id)
+        });
+        if !already_registered {
+            cx.observe(&client, move |this, client, cx| {
+                let connection_state = client.read(cx).connection_state();
+                if connection_state == ConnectionState::Connected
+                    && last_connection_state != ConnectionState::Connected
+                {
+                    log::info!(
+                        "Remote client reconnected; scheduling extension sync: {:?}",
+                        client.read(cx).connection_options()
+                    );
+                    this.ssh_registered_tx.unbounded_send(()).ok();
+                }
+                last_connection_state = connection_state;
+            })
+            .detach();
+            self.remote_clients.push(client.downgrade());
+        }
+
         self.ssh_registered_tx.unbounded_send(()).ok();
     }
 }

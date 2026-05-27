@@ -405,6 +405,9 @@ impl LanguageRegistry {
                 existing_language.matcher = matcher;
                 existing_language.load = load;
                 existing_language.manifest_name = manifest_name;
+                state.version += 1;
+                state.reload_count += 1;
+                *state.subscription.0.borrow_mut() = ();
                 return;
             }
         }
